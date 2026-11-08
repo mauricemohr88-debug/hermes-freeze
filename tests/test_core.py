@@ -522,6 +522,110 @@ class FieldCheckTest(unittest.TestCase):
         self.assertIn(["s1", "output", sandbox.JSON, "orders"], [r["path"] for r in res["reads"]])
 
 
+COUNT_CODE = (
+    "import posixpath\n"
+    "def compute(scope):\n"
+    "    counts = scope['s2']['counts']\n"
+    "    return ''.join('%s: %d\\n' % (posixpath.basename(p), counts.get(p, 0))\n"
+    "                   for p in scope['s1']['files'])\n")
+
+
+class LookupTest(unittest.TestCase):
+    """A lookup by a key from the data that always hit when frozen must not fall back later."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.wf = {"cwd": self.dir, "steps": [
+            {"id": "s1", "kind": "tool", "tool": "search_files", "args": {"target": "files"}},
+            {"id": "s2", "kind": "tool", "tool": "search_files", "args": {"output_mode": "count"}},
+            {"id": "c1", "kind": "compute", "for": "write_file.content", "code": COUNT_CODE},
+            {"id": "s3", "kind": "tool", "tool": "write_file",
+             "args": {"path": "refunds.md", "content": "{{c1}}"},
+             "recorded_args": {"path": "refunds.md", "content": "a.csv: 1\nb.csv: 2\n"}},
+        ]}
+        self.writes = []
+
+    def freeze_on(self, files, counts):
+        _, self.wf["steps"][2]["reads"] = sandbox.track_reads(
+            COUNT_CODE, {"s1": {"files": files}, "s2": {"counts": counts}})
+
+    def run_with(self, files, counts):
+        def dispatch(tool, args):
+            if tool == "write_file":
+                self.writes.append(args["content"])
+                return json.dumps({"bytes_written": len(args["content"])})
+            if args.get("output_mode") == "count":
+                return json.dumps({"total_count": sum(counts.values()), "counts": counts})
+            return json.dumps({"total_count": len(files), "files": files})
+        return replay.run(self.wf, dispatch, log=lambda m: None)
+
+    def test_new_file_with_counts_runs(self):
+        self.freeze_on(["d/a.csv", "d/b.csv"], {"d/a.csv": 1, "d/b.csv": 2})
+        report = self.run_with(["d/a.csv", "d/b.csv", "d/c.csv"],
+                               {"d/a.csv": 1, "d/b.csv": 2, "d/c.csv": 4})
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(self.writes, ["a.csv: 1\nb.csv: 2\nc.csv: 4\n"])
+
+    def test_missing_entry_stops_before_the_default_is_written(self):
+        # The new export got an extra column after the status, so the count pattern no longer
+        # matches it and the count table has no entry for it. counts.get(..., 0) would say 0.
+        self.freeze_on(["d/a.csv", "d/b.csv"], {"d/a.csv": 1, "d/b.csv": 2})
+        report = self.run_with(["d/a.csv", "d/b.csv", "d/c.csv"], {"d/a.csv": 1, "d/b.csv": 2})
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["drift"]["step"], "c1")
+        self.assertIn("s2.counts has no entry for 'd/c.csv'", report["drift"]["reason"])
+        self.assertEqual(self.writes, [])
+
+    def test_lookup_that_already_missed_when_frozen_may_miss(self):
+        self.freeze_on(["d/a.csv", "d/b.csv"], {"d/a.csv": 1})
+        report = self.run_with(["d/a.csv", "d/b.csv", "d/c.csv"], {"d/a.csv": 3})
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(self.writes, ["a.csv: 3\nb.csv: 0\nc.csv: 0\n"])
+
+
+class ExitCodeTest(unittest.TestCase):
+    """Replays accept exactly the exit code the recording had, not just "also non-zero"."""
+
+    def wf(self, recorded):
+        return {"cwd": tempfile.gettempdir(), "steps": [
+            {"id": "s1", "kind": "tool", "tool": "terminal", "args": {"command": "pytest -q"},
+             "exit_code": recorded}]}
+
+    def run_with(self, recorded, now):
+        log = []
+        report = replay.run(self.wf(recorded),
+                            lambda t, a: json.dumps({"output": "", "exit_code": now}),
+                            log=log.append)
+        return report, log
+
+    def test_same_failing_exit_code_runs_and_says_so(self):
+        report, log = self.run_with(1, 1)
+        self.assertTrue(report["ok"], report)
+        self.assertIn("    exit code 1, as in the recording", log)
+
+    def test_different_failing_exit_code_stops(self):
+        report, _ = self.run_with(1, 2)
+        self.assertFalse(report["ok"])
+        self.assertIn("exit code 2 (recording: 1)", report["drift"]["reason"])
+
+    def test_failure_after_a_clean_recording_stops(self):
+        report, _ = self.run_with(0, 1)
+        self.assertFalse(report["ok"])
+
+    def test_freeze_points_out_a_recorded_failure(self):
+        from unittest import mock
+        turn = {"turn_id": 1, "meta": {"user_message": "run the tests", "answer": None},
+                "calls": [{"tool_name": "terminal", "status": "ok", "cwd": tempfile.gettempdir(),
+                           "args": json.dumps({"command": "pytest -q"}),
+                           "result": json.dumps({"output": "47 failed", "exit_code": 1})}]}
+        with mock.patch.object(freezer.store, "load_turns", return_value=[turn]), \
+                mock.patch.object(freezer.store, "save_workflow"):
+            wf = freezer.freeze("tests", "session-1", lambda m: "")
+        self.assertTrue(any("exited with code 1 in the recording" in n for n in wf["notes"]),
+                        wf["notes"])
+        self.assertIn("Note: s1 terminal exited with code 1", freezer.summary(wf))
+
+
 class OutputTest(unittest.TestCase):
     def test_drift_message_wraps_without_splitting_paths(self):
         from freeze_core import cli

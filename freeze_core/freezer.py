@@ -38,6 +38,12 @@ def freeze(name: str, session_id: str, complete: Callable[[list[dict]], str], *,
                           f"(skipped: {', '.join(draft['skipped']) or 'none'})")
 
     notes = []
+    for step in steps:
+        code = step.get("exit_code")
+        if step["kind"] in ("tool", "foreach") and isinstance(code, int) and code != 0:
+            notes.append(f"{step['id']} {step['tool']} exited with code {code} in the recording. "
+                         f"Replays treat {code} as expected there and stop on any other code; if "
+                         "that run was failing, fix the task and /freeze again")
     for step in list(steps):
         if step["kind"] != "compute":
             continue

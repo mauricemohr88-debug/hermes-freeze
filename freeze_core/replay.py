@@ -1,9 +1,10 @@
 """Replay a frozen workflow through Hermes' own tools, without the model.
 
 The run stops at the first sign that the world no longer matches the recording ("drift"): a tool
-error, a non-zero exit where the recording had zero, a ref that no longer resolves, a field the
-compiled code reads that is missing or changed type, a compute step that fails, or a value that is
-unsafe to splice. Steps after the drift never run, so a stale
+error, an exit code other than the recorded one, a ref that no longer resolves, a field the
+compiled code reads that is missing or changed type, a lookup by a data key that always found an
+entry when frozen and finds none now, a compute step that fails, or a value that is unsafe to
+splice. Steps after the drift never run, so a stale
 workflow cannot write half a result.
 """
 from __future__ import annotations
@@ -274,9 +275,13 @@ class _Runner:
             raise Drift(step["id"], f"{tool} failed: {failed}")
         rec_exit = step.get("exit_code")
         if isinstance(result, dict) and rec_exit is not None and "exit_code" in result:
-            if (rec_exit == 0) != (result["exit_code"] == 0):
+            # Exact match: a run that already failed when frozen must not pass for a run that
+            # fails differently now (grep: 1 is "no match", 2 is an error).
+            if result["exit_code"] != rec_exit:
                 raise Drift(step["id"], f"{tool} exit code {result['exit_code']} "
                                         f"(recording: {rec_exit})")
+            if rec_exit != 0:
+                self.log(f"    exit code {rec_exit}, as in the recording")
         if tool == "write_file" and isinstance(args.get("path"), str) \
                 and isinstance(args.get("content"), str):
             self.written[self._abs(args["path"])] = _sha(args["content"])
@@ -310,10 +315,24 @@ class _Runner:
             if self.dry_run and self.skipped_any:
                 raise _Skip()
             self.log(f"• {sid} compute {step['for']}")
+            lookups = {json.dumps(r["path"]): r["path"] for r in step.get("reads") or ()
+                       if sandbox.ANY in r["path"] and not r.get("optional")}
             try:
-                self.scope[sid] = sandbox.run(step["code"], dict(self.scope))
+                if lookups:
+                    value, misses = sandbox.run_tracked(step["code"], dict(self.scope))
+                else:
+                    value, misses = sandbox.run(step["code"], dict(self.scope)), {}
             except (sandbox.UnsafeCode, sandbox.ComputeError) as exc:
                 raise Drift(sid, f"compute failed: {exc}") from None
+            for key, path in lookups.items():
+                if key in misses:
+                    # Code like counts.get(name, 0) would quietly use the default; when frozen,
+                    # every such lookup found real data, so a miss means the data changed.
+                    where = _fmt_path(path[:-1]) if path[-1] == sandbox.ANY else _fmt_path(path)
+                    raise Drift(sid, f"{where} has no entry for {misses[key]!r}; every lookup "
+                                     "found one when frozen, so the code would fall back to a "
+                                     "default instead of real data")
+            self.scope[sid] = value
         elif kind == "const":
             self.scope[sid] = step["value"]
         else:

@@ -83,9 +83,11 @@ def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
 payload = json.loads(sys.stdin.read())
 reads = {}
 absent = set()
+misses = {}
 scope = payload["scope"]
 if payload.get("track"):
-    # Freeze time only: wrap the scope so field reads are noted. Replays run unwrapped.
+    # Wrap the scope so field reads are noted: at freeze time to learn them, and at replay for
+    # steps whose code looks things up by keys that come from the data.
     LIST, JSON, ANY = 0, 1, 2
     FIELDS = set(payload.get("fields") or ())
     def kind(v):
@@ -108,12 +110,17 @@ if payload.get("track"):
             # Only names spelled out in the code are fields; keys taken from the data change
             # from run to run and must not become requirements.
             return self._path + [key if key in FIELDS else ANY]
+        def _miss(self, key):
+            path = self._child(key)
+            absent.add(json.dumps(path))
+            if path[-1] == ANY:
+                misses.setdefault(json.dumps(path), str(key)[:120])
         def __getitem__(self, key):
             path = self._child(key)
             try:
                 v = dict.__getitem__(self, key)
             except KeyError:
-                absent.add(json.dumps(path))
+                self._miss(key)
                 raise
             reads.setdefault(json.dumps(path), set()).add(kind(v))
             return wrap(v, path)
@@ -122,12 +129,12 @@ if payload.get("track"):
             # hide that it disappeared later. One already missing somewhere is optional.
             if dict.__contains__(self, key):
                 return self[key]
-            absent.add(json.dumps(self._child(key)))
+            self._miss(key)
             return default
         def __contains__(self, key):
             found = dict.__contains__(self, key)
             if not found:
-                absent.add(json.dumps(self._child(key)))
+                self._miss(key)
             return found
     class TList(list):
         def __init__(self, items, path):
@@ -160,7 +167,7 @@ try:
     exec(compile(payload["code"], "<compiled>", "exec"), env)
     value = env["compute"](scope)
     out = {"ok": True, "value": value,
-           "reads": [[k, sorted(v), k in absent] for k, v in reads.items()]}
+           "reads": [[k, sorted(v), k in absent] for k, v in reads.items()], "misses": misses}
 except BaseException as exc:
     out = {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}
 sys.stdout = real_stdout
@@ -186,6 +193,16 @@ def track_reads(code: str, scope: dict) -> tuple[Any, list[dict]]:
     reads = [{"path": json.loads(path), "types": types, **({"optional": True} if optional else {})}
              for path, types, optional in out["reads"]]
     return out["value"], sorted(reads, key=lambda r: (len(r["path"]), json.dumps(r["path"])))
+
+
+def run_tracked(code: str, scope: dict) -> tuple[Any, dict[str, str]]:
+    """Run ``code`` with tracking and return (value, misses).
+
+    ``misses`` maps each read path ending in ``ANY`` (a lookup by a key from the data) that
+    found nothing to the first key it missed, e.g. a file name a count table has no entry for.
+    """
+    out = _execute(code, scope, track=True)
+    return out["value"], out.get("misses") or {}
 
 
 def _string_literals(code: str) -> set[str]:
