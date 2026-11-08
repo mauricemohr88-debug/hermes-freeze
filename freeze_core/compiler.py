@@ -29,6 +29,10 @@ _SYSTEM = (
     "os, sys, subprocess, eval, exec, open, getattr or dunder attributes.\n"
     "- read_file results carry `content` with a `N|` line-number prefix on every line; strip it.\n"
     "- terminal results are dicts with `output` (stdout+stderr text) and `exit_code`.\n"
+    "- Read the fields the value depends on directly (`row['amount']`), not with `.get()` "
+    "defaults or try/except: if such a field is missing later, the function must fail so the "
+    "replay stops instead of writing a wrong value. Use a fallback only for fields the data "
+    "shown already leaves out in some items.\n"
     "- If the value cannot be derived from the data shown (the agent used information its tool "
     "calls never returned), do not guess: reply with one line `INSUFFICIENT: <what is missing>`.\n"
     "- Otherwise reply with one ```python code block and nothing else."
@@ -123,7 +127,11 @@ def hardcoded(code: str, scope: dict, task: str) -> list[str]:
 
 def compile_step(complete: Callable[[list[dict]], str], *, task: str, steps: list[dict],
                  scope: dict, step: dict, partial_walks: Optional[list[dict]] = None) -> dict:
-    """Return {"code", "attempts"}, {"insufficient", "attempts"} or {"error", "attempts"}."""
+    """Return {"code", "attempts", "reads"}, {"insufficient", "attempts"} or {"error", "attempts"}.
+
+    ``reads`` lists the scope fields the accepted code reads (see ``sandbox.track_reads``), or
+    None when tracking could not reproduce the value; replays then skip the field check.
+    """
     view = {k: v for k, v in scope.items()}
     context = describe_scope(steps, view, step["id"])
     for walk in partial_walks or []:
@@ -154,7 +162,7 @@ def compile_step(complete: Callable[[list[dict]], str], *, task: str, steps: lis
                 last_error = ("the code spells out values from the data (" + ", ".join(baked[:8])
                               + "); compute them from scope instead")
             elif matches(got, want):
-                return {"code": code, "attempts": attempt}
+                return {"code": code, "attempts": attempt, "reads": _reads(code, visible, got)}
             else:
                 last_error = ("the result does not match the recorded value; "
                               + _first_difference(got, want))
@@ -166,6 +174,19 @@ def compile_step(complete: Callable[[list[dict]], str], *, task: str, steps: lis
                                         "the full corrected code block."},
         ]
     return {"error": last_error or "no attempt succeeded", "attempts": MAX_ATTEMPTS}
+
+
+def _reads(code: str, visible: dict, got: Any) -> Optional[list[dict]]:
+    """Fields the accepted code reads, or None if the tracked run behaves differently.
+
+    Tracking wraps the data in dict/list/str subclasses; code that reacts to that is rare, and
+    then the workflow simply has no field check rather than a wrong one.
+    """
+    try:
+        value, reads = sandbox.track_reads(code, visible)
+    except (sandbox.UnsafeCode, sandbox.ComputeError):
+        return None
+    return reads if value == got else None
 
 
 def _visible(scope: dict, steps: list[dict], upto: str) -> dict:

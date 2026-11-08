@@ -50,6 +50,7 @@ def freeze(name: str, session_id: str, complete: Callable[[list[dict]], str], *,
                               "run /freeze again.") from exc
         if "code" in res:
             step["code"], step["attempts"] = res["code"], res["attempts"]
+            step["reads"] = res.get("reads")
             scope[step["id"]] = step["recorded"]
             continue
         problem = (res.get("insufficient") or res.get("error") or "").rstrip(". ")

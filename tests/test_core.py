@@ -431,6 +431,97 @@ class OverwriteTest(unittest.TestCase):
         self.assertEqual(saved, [])
 
 
+API_OLD = {"orders": [{"id": 1, "refund": 5}, {"id": 2, "refund": 3, "note": {"by": "me"}}],
+           "by_day": {"2026-11-01": 2, "2026-11-02": 6}}
+LENIENT_API_CODE = (
+    "import json\n"
+    "def compute(scope):\n"
+    "    body = json.loads(scope['s1']['output'])\n"
+    "    notes = sum(1 for o in body['orders'] if o.get('note') and o['note']['by'])\n"
+    "    days = sum(body['by_day'].get(d, 0) for d in sorted(body['by_day']))\n"
+    "    return 'total: %d, notes: %d, days: %d' % (\n"
+    "        sum(o.get('refund', 0) for o in body.get('orders', [])), notes, days)\n")
+
+
+class FieldCheckTest(unittest.TestCase):
+    """Fields the compiled code reads must still be there, with the same type, before writing."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.wf = {"cwd": self.dir, "steps": [
+            {"id": "s1", "kind": "tool", "tool": "terminal", "exit_code": 0,
+             "args": {"command": "curl -s https://api.example.com/orders"},
+             "recorded_args": {"command": "curl -s https://api.example.com/orders"}},
+            {"id": "c1", "kind": "compute", "for": "write_file.content", "code": LENIENT_API_CODE},
+            {"id": "s2", "kind": "tool", "tool": "write_file",
+             "args": {"path": "out.md", "content": "{{c1}}"},
+             "recorded_args": {"path": "out.md", "content": "total: 8, notes: 1, days: 8"}},
+        ]}
+        _, self.wf["steps"][1]["reads"] = sandbox.track_reads(
+            LENIENT_API_CODE, {"s1": {"output": json.dumps(API_OLD), "exit_code": 0}})
+        self.writes = []
+
+    def run_with(self, body):
+        def dispatch(tool, args):
+            if tool == "terminal":
+                text = body if isinstance(body, str) else json.dumps(body)
+                return json.dumps({"output": text, "exit_code": 0})
+            self.writes.append(args["content"])
+            return json.dumps({"bytes_written": len(args["content"])})
+        return replay.run(self.wf, dispatch, log=lambda m: None)
+
+    def test_reads_cover_json_lists_and_literal_fields_only(self):
+        paths = [r["path"] for r in self.wf["steps"][1]["reads"]]
+        self.assertIn(["s1", "output", sandbox.JSON, "orders", sandbox.LIST, "refund"], paths)
+        # Day keys come from the data, so any value of by_day counts, not a fixed date.
+        self.assertIn(["s1", "output", sandbox.JSON, "by_day", sandbox.ANY], paths)
+        self.assertFalse(any("2026-11-01" in p for p in paths))
+
+    def test_unchanged_api_runs(self):
+        report = self.run_with(API_OLD)
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(self.writes, ["total: 8, notes: 1, days: 8"])
+
+    def test_renamed_field_stops_before_writing_even_with_a_fallback(self):
+        body = {"orders": [{"id": 1, "refund_amount": 5}, {"id": 2, "refund_amount": 3}],
+                "by_day": {}}
+        report = self.run_with(body)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["drift"]["step"], "s1")
+        self.assertIn("s1.output.orders[].refund is missing", report["drift"]["reason"])
+        self.assertEqual(self.writes, [])
+
+    def test_changed_type_stops(self):
+        body = {"orders": [{"id": 1, "refund": "5.00"}], "by_day": {}}
+        report = self.run_with(body)
+        self.assertFalse(report["ok"])
+        self.assertIn("is now string (was number)", report["drift"]["reason"])
+        self.assertEqual(self.writes, [])
+
+    def test_optional_and_data_keys_may_vary(self):
+        # "note" (and note.by under it) is missing everywhere now, but one item already lacked
+        # it when frozen, so it is optional. New days replace old ones freely.
+        body = {"orders": [{"id": 3, "refund": 4}, {"id": 4, "refund": 1}],
+                "by_day": {"2026-11-09": 5}, "extra": True}
+        report = self.run_with(body)
+        self.assertTrue(report["ok"], report)
+
+    def test_output_that_is_no_longer_json_stops(self):
+        report = self.run_with("<html>maintenance</html>")
+        self.assertFalse(report["ok"])
+        self.assertIn("s1.output is no longer JSON", report["drift"]["reason"])
+
+    def test_compile_step_records_reads(self):
+        steps = [{"id": "s1", "kind": "tool", "tool": "terminal", "args": {"command": "curl x"}},
+                 {"id": "c1", "kind": "compute", "for": "answer",
+                  "recorded": "total: 8, notes: 1, days: 8"}]
+        scope = {"s1": {"output": json.dumps(API_OLD), "exit_code": 0}}
+        res = compiler.compile_step(lambda m: "```python\n" + LENIENT_API_CODE + "```",
+                                    task="sum refunds", steps=steps, scope=scope, step=steps[1])
+        self.assertIn("code", res, res)
+        self.assertIn(["s1", "output", sandbox.JSON, "orders"], [r["path"] for r in res["reads"]])
+
+
 class OutputTest(unittest.TestCase):
     def test_drift_message_wraps_without_splitting_paths(self):
         from freeze_core import cli

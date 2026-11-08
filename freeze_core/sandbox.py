@@ -5,6 +5,10 @@ small allowlist, dunder access and the builtins that reach files, the process or
 Then it runs in a separate ``python -I`` process with a timeout and a reduced set of builtins,
 fed the scope as JSON on stdin. It never sees the plugin's memory, the agent or the tool registry.
 This is defence in depth for code the user reviewed at freeze time, not a hard sandbox.
+
+``track_reads`` runs the code once more at freeze time and notes which fields of the scope it
+reads (including JSON parsed from a tool's text output), so replays can stop when one of them
+disappears or changes type instead of computing a wrong value from a fallback.
 """
 from __future__ import annotations
 
@@ -24,6 +28,9 @@ _BANNED_NAMES = frozenset({
     "classmethod", "staticmethod", "super", "type", "object",
 })
 TIMEOUT_S = 10
+# Path markers in recorded reads: any item of a list, JSON parsed from a string, and any value
+# of a dict looked up by a key that comes from the data (a file name, a date) rather than the code.
+LIST, JSON, ANY = 0, 1, 2
 
 
 class UnsafeCode(ValueError):
@@ -74,14 +81,86 @@ def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
         raise ImportError("import of %r is not allowed" % name)
     return real_import(name, globals, locals, fromlist, level)
 payload = json.loads(sys.stdin.read())
+reads = {}
+absent = set()
+scope = payload["scope"]
+if payload.get("track"):
+    # Freeze time only: wrap the scope so field reads are noted. Replays run unwrapped.
+    LIST, JSON, ANY = 0, 1, 2
+    FIELDS = set(payload.get("fields") or ())
+    def kind(v):
+        if v is None: return "null"
+        if isinstance(v, bool): return "bool"
+        if isinstance(v, (int, float)): return "number"
+        if isinstance(v, str): return "string"
+        if isinstance(v, list): return "array"
+        return "object"
+    def wrap(v, path):
+        if isinstance(v, dict): return TDict(v, path)
+        if isinstance(v, list): return TList(v, path)
+        if isinstance(v, str): return TStr(v, path)
+        return v
+    class TDict(dict):
+        def __init__(self, d, path):
+            dict.__init__(self, d)
+            self._path = path
+        def _child(self, key):
+            # Only names spelled out in the code are fields; keys taken from the data change
+            # from run to run and must not become requirements.
+            return self._path + [key if key in FIELDS else ANY]
+        def __getitem__(self, key):
+            path = self._child(key)
+            try:
+                v = dict.__getitem__(self, key)
+            except KeyError:
+                absent.add(json.dumps(path))
+                raise
+            reads.setdefault(json.dumps(path), set()).add(kind(v))
+            return wrap(v, path)
+        def get(self, key, default=None):
+            # A field read through get() still counts when it was there: a fallback must not
+            # hide that it disappeared later. One already missing somewhere is optional.
+            if dict.__contains__(self, key):
+                return self[key]
+            absent.add(json.dumps(self._child(key)))
+            return default
+        def __contains__(self, key):
+            found = dict.__contains__(self, key)
+            if not found:
+                absent.add(json.dumps(self._child(key)))
+            return found
+    class TList(list):
+        def __init__(self, items, path):
+            list.__init__(self, items)
+            self._path = path
+        def __getitem__(self, i):
+            v = list.__getitem__(self, i)
+            if isinstance(i, slice):
+                return TList(v, self._path)
+            return wrap(v, self._path + [LIST])
+        def __iter__(self):
+            for v in list.__iter__(self):
+                yield wrap(v, self._path + [LIST])
+    class TStr(str):
+        def __new__(cls, s, path):
+            obj = str.__new__(cls, s)
+            obj._path = path
+            return obj
+    real_loads = json.loads
+    def tracked_loads(s, *args, **kwargs):
+        v = real_loads(s, *args, **kwargs)
+        return wrap(v, s._path + [JSON]) if isinstance(s, TStr) else v
+    json.loads = tracked_loads
+    scope = TDict(scope, [])
 safe = {n: getattr(builtins, n) for n in SAFE if hasattr(builtins, n)}
 safe["__import__"] = guarded_import
 env = {"__builtins__": safe, "__name__": "compiled"}
 real_stdout, sys.stdout = sys.stdout, io.StringIO()  # stray print() must not corrupt the reply
 try:
     exec(compile(payload["code"], "<compiled>", "exec"), env)
-    value = env["compute"](payload["scope"])
-    out = {"ok": True, "value": value}
+    value = env["compute"](scope)
+    out = {"ok": True, "value": value,
+           "reads": [[k, sorted(v), k in absent] for k, v in reads.items()]}
 except BaseException as exc:
     out = {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}
 sys.stdout = real_stdout
@@ -93,11 +172,35 @@ except (TypeError, ValueError) as exc:
 
 
 def run(code: str, scope: dict) -> Any:
+    return _execute(code, scope, track=False)["value"]
+
+
+def track_reads(code: str, scope: dict) -> tuple[Any, list[dict]]:
+    """Run ``code`` and return (value, reads); each read is {"path": [...], "types": [...]}.
+
+    ``optional`` marks a field the data already left out somewhere at freeze time. A path
+    starts with a step id, then keys, ``LIST`` for "any item of this list", ``JSON``
+    for "the JSON parsed from this string" and ``ANY`` for "any value of this dict".
+    """
+    out = _execute(code, scope, track=True)
+    reads = [{"path": json.loads(path), "types": types, **({"optional": True} if optional else {})}
+             for path, types, optional in out["reads"]]
+    return out["value"], sorted(reads, key=lambda r: (len(r["path"]), json.dumps(r["path"])))
+
+
+def _string_literals(code: str) -> set[str]:
+    return {n.value for n in ast.walk(ast.parse(code))
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+
+
+def _execute(code: str, scope: dict, *, track: bool) -> dict:
     check(code)
     try:
         proc = subprocess.run(
             [sys.executable, "-I", "-c", _RUNNER, json.dumps(sorted(ALLOWED_MODULES))],
-            input=json.dumps({"code": code, "scope": scope}, default=str),
+            input=json.dumps({"code": code, "scope": scope, "track": track,
+                              "fields": sorted(_string_literals(code)) if track else []},
+                             default=str),
             capture_output=True, text=True, timeout=TIMEOUT_S,
         )
     except subprocess.TimeoutExpired:
@@ -107,4 +210,4 @@ def run(code: str, scope: dict) -> Any:
     out = json.loads(proc.stdout)
     if not out["ok"]:
         raise ComputeError(out["error"])
-    return out["value"]
+    return out

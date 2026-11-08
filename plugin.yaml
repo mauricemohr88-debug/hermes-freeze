@@ -1,5 +1,5 @@
 name: freeze
-version: 0.1.1
+version: 0.1.2
 # Attended replays rely on 0.23's terminal approval prompt; 0.21 auto-approved there instead.
 requires_hermes: ">=0.23.0"
 description: "Let Hermes do a task once, then replay it without the model: /freeze turns the last turn's tool calls into a checked workflow that hermes freeze run repeats with zero model calls and stops on drift."

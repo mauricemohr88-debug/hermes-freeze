@@ -1,13 +1,15 @@
 """Replay a frozen workflow through Hermes' own tools, without the model.
 
 The run stops at the first sign that the world no longer matches the recording ("drift"): a tool
-error, a non-zero exit where the recording had zero, a ref that no longer resolves, a compute step
-that fails, or a value that is unsafe to splice. Steps after the drift never run, so a stale
+error, a non-zero exit where the recording had zero, a ref that no longer resolves, a field the
+compiled code reads that is missing or changed type, a compute step that fails, or a value that is
+unsafe to splice. Steps after the drift never run, so a stale
 workflow cannot write half a result.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import time
 from pathlib import Path
@@ -74,6 +76,79 @@ def _hashes(entry: Any) -> set[str]:
     return set()
 
 
+def _kind(value: Any) -> str:
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    return "object" if isinstance(value, dict) else "null"
+
+
+def _fmt_path(path: list) -> str:
+    out = ""
+    for part in path:
+        if isinstance(part, str):
+            out += f".{part}" if out else part
+        elif part == sandbox.LIST:
+            out += "[]"
+        elif part == sandbox.ANY:
+            out += "[*]"
+    return out
+
+
+def _read_problem(scope: dict, read: dict, parsed: dict, optional: set[str]) -> Optional[str]:
+    """Why a field the compiled code read at freeze time is no longer usable, or None.
+
+    A key under a list counts as present if any item still has it, so optional per-item fields
+    do not stop a run; a renamed field is missing from every item and does. Nulls and empty
+    lists are left to the code itself.
+    """
+    path = read.get("path") or []
+    nodes: list = [scope]
+    for i, part in enumerate(path):
+        nodes = [n for n in nodes if n is not None]
+        if not nodes:
+            return None
+        if isinstance(part, str):
+            nxt = [n[part] for n in nodes if isinstance(n, dict) and part in n]
+            if not nxt:
+                if json.dumps(path[:i + 1]) in optional:
+                    return None  # already missing somewhere when frozen
+                return f"{_fmt_path(path[:i + 1])} is missing"
+        elif part == sandbox.LIST:
+            if any(not isinstance(n, list) for n in nodes):
+                return f"{_fmt_path(path[:i])} is no longer a list"
+            nxt = [v for n in nodes for v in n]
+        elif part == sandbox.ANY:
+            if any(not isinstance(n, dict) for n in nodes):
+                return f"{_fmt_path(path[:i])} is no longer an object"
+            nxt = [v for n in nodes for v in n.values()]
+        elif part == sandbox.JSON:
+            nxt = []
+            for n in nodes:
+                if not isinstance(n, str):
+                    nxt.append(n)
+                    continue
+                if id(n) not in parsed:
+                    try:
+                        parsed[id(n)] = json.loads(n)
+                    except ValueError:
+                        return f"{_fmt_path(path[:i])} is no longer JSON"
+                nxt.append(parsed[id(n)])
+        else:
+            return None
+        nodes = nxt
+    was = set(read.get("types") or ()) - {"null"}
+    now = {_kind(n) for n in nodes if n is not None}
+    if was and now - was:
+        return f"{_fmt_path(path)} is now {'/'.join(sorted(now))} (was {'/'.join(sorted(was))})"
+    return None
+
+
 def _short(args: dict) -> str:
     return ", ".join(f"{k}={str(v)[:60]!r}" for k, v in args.items())[:200]
 
@@ -89,6 +164,19 @@ class _Runner:
         self.tool_calls = 0
         self.skipped_any = False
         self.written = dict(written)
+        # Fields the compiled code read at freeze time, grouped by the tool step they come from,
+        # so each step's result is checked as soon as it arrives, before anything later runs.
+        roots = {s["id"] for s in wf["steps"] if s["kind"] in ("tool", "foreach")}
+        reads: dict[str, dict[str, dict]] = {}
+        for s in wf["steps"]:
+            for read in s.get("reads") or ():
+                path = read.get("path") or []
+                if path and path[0] in roots:
+                    reads.setdefault(path[0], {})[json.dumps(path)] = read
+        self.reads = {sid: sorted(r.values(), key=lambda x: len(x["path"]))
+                      for sid, r in reads.items()}
+        self.optional = {key for r in reads.values() for key, read in r.items()
+                         if read.get("optional")}
 
     def _abs(self, path: str) -> str:
         p = Path(path).expanduser()
@@ -148,6 +236,14 @@ class _Runner:
             raise Drift(step["id"], f"cannot save replay state before writing {path}: {exc}") \
                 from None
 
+    def _check_reads(self, sid: str) -> None:
+        parsed: dict = {}
+        for read in self.reads.get(sid, ()):
+            problem = _read_problem(self.scope, read, parsed, self.optional)
+            if problem:
+                raise Drift(sid, f"{problem}; the frozen workflow reads it, so the data no "
+                                 "longer has the shape it was frozen on")
+
     def render(self, step: dict, extra: Optional[dict] = None) -> dict:
         check = _command_check if step["tool"] == "terminal" else None
         try:
@@ -191,6 +287,7 @@ class _Runner:
         if kind == "tool":
             self.log(f"• {sid} {step['tool']}")
             self.scope[sid] = self.call(step, self.render(step))
+            self._check_reads(sid)
         elif kind == "foreach":
             try:
                 items = R.resolve(self.scope, step["over"])
@@ -208,6 +305,7 @@ class _Runner:
             self.log(f"• {sid} {step['tool']} × {len(items)} "
                      f"(recording had {step.get('recorded_count')})")
             self.scope[sid] = [self.call(step, self.render(step, {"item": it})) for it in items]
+            self._check_reads(sid)
         elif kind == "compute":
             if self.dry_run and self.skipped_any:
                 raise _Skip()

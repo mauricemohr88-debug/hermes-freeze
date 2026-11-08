@@ -66,6 +66,9 @@ Then, in a chat, let Hermes do a task and type `/freeze <name>`. To try it on sa
   - a non-zero exit code where the recording had zero;
   - a list that is empty now;
   - a reference that no longer resolves;
+  - a field the compiled code read when you froze it, also inside JSON a command printed, that
+    is now missing or has another type, even if the code has a fallback for it (fields some
+    items already lacked count as optional);
   - a compiled step that fails;
   - an output file someone edited since Freeze last wrote it.
 
@@ -113,8 +116,9 @@ Then, in a chat, let Hermes do a task and type `/freeze <name>`. To try it on sa
 
 ## Limits
 
-- Freeze catches structural drift, not every change in meaning. If a CSV column is renamed and a
-  command quietly prints 0, the replay reports 0.
+- Freeze catches structural drift, not every change in meaning. A field that keeps its name but
+  changes what it means goes unnoticed. If a CSV column is renamed and a command quietly prints 0,
+  the replay reports 0.
 - Positional bindings (`files[0]`) depend on the order a tool returns. Whole-list loops do not.
 - When the agent solves a task with an inline script (`python -c`, a heredoc), Hermes flags that
   command, so the workflow needs approval on every run and cannot be scheduled while
