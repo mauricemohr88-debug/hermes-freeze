@@ -359,6 +359,77 @@ class OverwriteTest(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(Path(self.path).read_text(encoding="utf-8"), "my own notes")
 
+    def test_identical_content_is_rewritten(self):
+        # The file already holds what this step writes, e.g. after a run died before saving
+        # its state: rewriting it loses nothing, so it is not drift.
+        Path(self.path).write_text("new", encoding="utf-8")
+        report = replay.run(self.wf, self.dispatch, log=lambda m: None)
+        self.assertTrue(report["ok"], report)
+
+    def test_pending_hash_is_saved_before_the_write(self):
+        Path(self.path).write_text("recorded", encoding="utf-8")
+        saved = []
+
+        def persist(written):
+            saved.append((list(self.calls), written))
+
+        replay.run(self.wf, self.dispatch, log=lambda m: None, persist=persist)
+        calls_before, written = saved[0]
+        self.assertNotIn("write_file", calls_before)
+        self.assertEqual(written[os.path.realpath(self.path)], [replay._sha("new")])
+
+    def test_run_that_died_after_writing_is_recognised(self):
+        real = os.path.realpath(self.path)
+        Path(self.path).write_text("day1", encoding="utf-8")
+        state = {"map": {real: replay._sha("day1")}}
+
+        def persist(written):
+            state["map"] = written
+
+        def dies_after_write(tool, args):
+            out = self.dispatch(tool, args)
+            if tool == "write_file":
+                raise KeyboardInterrupt
+            return out
+
+        self.wf["steps"][0]["args"]["content"] = "day2"
+        with self.assertRaises(KeyboardInterrupt):
+            replay.run(self.wf, dies_after_write, log=lambda m: None, written=state["map"],
+                       persist=persist)
+        self.assertEqual(Path(self.path).read_text(encoding="utf-8"), "day2")
+        # New data arrived before the next run, so it writes different content.
+        self.wf["steps"][0]["args"]["content"] = "day3"
+        report = replay.run(self.wf, self.dispatch, log=lambda m: None, written=state["map"])
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["written"], {real: replay._sha("day3")})
+
+    def test_run_that_died_before_writing_still_accepts_the_old_file(self):
+        real = os.path.realpath(self.path)
+        Path(self.path).write_text("day1", encoding="utf-8")
+        pending = {real: sorted({replay._sha("day1"), replay._sha("day2")})}
+        self.wf["steps"][0]["args"]["content"] = "day3"
+        report = replay.run(self.wf, self.dispatch, log=lambda m: None, written=pending)
+        self.assertTrue(report["ok"], report)
+
+    def test_unsaved_state_stops_before_the_write(self):
+        Path(self.path).write_text("recorded", encoding="utf-8")
+
+        def persist(_written):
+            raise OSError("disk full")
+
+        report = replay.run(self.wf, self.dispatch, log=lambda m: None, persist=persist)
+        self.assertFalse(report["ok"])
+        self.assertIn("cannot save replay state", report["drift"]["reason"])
+        self.assertNotIn("write_file", self.calls)
+        self.assertEqual(Path(self.path).read_text(encoding="utf-8"), "recorded")
+
+    def test_dry_run_saves_no_state(self):
+        Path(self.path).write_text("recorded", encoding="utf-8")
+        saved = []
+        replay.run(self.wf, self.dispatch, dry_run=True, log=lambda m: None,
+                   persist=saved.append)
+        self.assertEqual(saved, [])
+
 
 class OutputTest(unittest.TestCase):
     def test_drift_message_wraps_without_splitting_paths(self):

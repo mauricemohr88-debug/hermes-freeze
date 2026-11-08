@@ -203,6 +203,7 @@ def delete_workflow(name: str) -> bool:
 
 # Files a workflow's replays wrote, as {absolute path: sha256 of the content}. A replay only
 # overwrites a file that still holds what freeze itself wrote last, so it never clobbers edits.
+# While a write is in flight the value is a list [old, new], so a crash mid-run is recognised.
 
 def _written_path(name: str) -> Path:
     d = data_dir() / "written"
@@ -210,7 +211,7 @@ def _written_path(name: str) -> Path:
     return d / f"{check_name(name)}.json"
 
 
-def load_written(name: str) -> dict[str, str]:
+def load_written(name: str) -> dict[str, str | list[str]]:
     path = _written_path(name)
     if not path.exists():
         return {}
@@ -218,7 +219,7 @@ def load_written(name: str) -> dict[str, str]:
     return data if isinstance(data, dict) else {}
 
 
-def save_written(name: str, written: dict[str, str]) -> None:
+def save_written(name: str, written: dict[str, str | list[str]]) -> None:
     path = _written_path(name)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(written, indent=2), encoding="utf-8")

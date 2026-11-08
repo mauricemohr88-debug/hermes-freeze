@@ -65,14 +65,25 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _hashes(entry: Any) -> set[str]:
+    """A written-map entry: one hash, or several while a write is in flight (old and new)."""
+    if isinstance(entry, str):
+        return {entry}
+    if isinstance(entry, list):
+        return {h for h in entry if isinstance(h, str)}
+    return set()
+
+
 def _short(args: dict) -> str:
     return ", ".join(f"{k}={str(v)[:60]!r}" for k, v in args.items())[:200]
 
 
 class _Runner:
     def __init__(self, wf: dict, dispatch: Callable[[str, dict], str], dry_run: bool,
-                 log: Callable[[str], None], written: dict[str, str]):
+                 log: Callable[[str], None], written: dict[str, Any],
+                 persist: Optional[Callable[[dict], None]]):
         self.wf, self.dispatch, self.dry_run, self.log = wf, dispatch, dry_run, log
+        self.persist = persist
         self.scope: dict[str, Any] = {}
         self.cwd = wf.get("cwd") or os.getcwd()
         self.tool_calls = 0
@@ -86,9 +97,10 @@ class _Runner:
     def _guard_overwrite(self, step: dict, args: dict) -> None:
         """Overwrite an existing file only if it still holds what freeze wrote there.
 
-        "What freeze wrote" is the content the recording wrote, or the last replay's. Anything
-        else means a person or another program changed the file, so the run stops instead of
-        clobbering it. When the file is ours, it is read in full through Hermes' read_file, so
+        "What freeze wrote" is the content the recording wrote, the last replay's, a write that
+        was in flight when an earlier run died, or exactly the content this step is about to
+        write (rewriting it loses nothing). Anything else means a person or another program
+        changed the file, so the run stops instead of clobbering it. When the file is ours, it is read in full through Hermes' read_file, so
         Hermes' own stale-write guard sees the content this run replaces.
         """
         path = self._abs(args["path"])
@@ -99,9 +111,10 @@ class _Runner:
         except (OSError, UnicodeDecodeError) as exc:
             raise Drift(step["id"], f"cannot check {path} before overwriting it: {exc}") from None
         recorded = (step.get("recorded_args") or {}).get("content")
-        ours = {self.written.get(path)}
-        if isinstance(recorded, str):
-            ours.add(_sha(recorded))
+        ours = _hashes(self.written.get(path))
+        for content in (recorded, args.get("content")):
+            if isinstance(content, str):
+                ours.add(_sha(content))
         if _sha(current) not in ours:
             raise Drift(step["id"], f"{path} changed since freeze last wrote it; not overwriting it")
         if self.dry_run:
@@ -117,6 +130,23 @@ class _Runner:
             if not isinstance(nxt, int) or nxt <= offset:
                 return
             offset = nxt
+
+    def _mark_pending(self, step: dict, args: dict) -> None:
+        """Save the new content's hash next to the old one before the write happens.
+
+        The map is otherwise saved only when the run ends. If the process dies between the
+        write and that save, the next run would not recognise its own output and would stop.
+        """
+        if self.persist is None or not isinstance(args.get("path"), str) \
+                or not isinstance(args.get("content"), str):
+            return
+        path = self._abs(args["path"])
+        self.written[path] = sorted(_hashes(self.written.get(path)) | {_sha(args["content"])})
+        try:
+            self.persist(dict(self.written))
+        except OSError as exc:
+            raise Drift(step["id"], f"cannot save replay state before writing {path}: {exc}") \
+                from None
 
     def render(self, step: dict, extra: Optional[dict] = None) -> dict:
         check = _command_check if step["tool"] == "terminal" else None
@@ -139,6 +169,8 @@ class _Runner:
             self.log(f"    would run {tool}({_short(args)})")
             self.skipped_any = True
             return None
+        if tool == "write_file":
+            self._mark_pending(step, args)
         result = R.as_data(self.dispatch(tool, args))
         self.tool_calls += 1
         failed = _tool_failed(result)
@@ -191,13 +223,15 @@ class _Runner:
 
 
 def run(wf: dict, dispatch: Callable[[str, dict], str], *, dry_run: bool = False,
-        log: Callable[[str], None] = print, written: Optional[dict[str, str]] = None) -> dict:
+        log: Callable[[str], None] = print, written: Optional[dict[str, Any]] = None,
+        persist: Optional[Callable[[dict], None]] = None) -> dict:
     """Execute ``wf``. ``dispatch(tool, args)`` returns the tool's JSON string result.
 
     ``written`` maps files earlier replays wrote to their content hash; the report's
-    ``written`` is the updated map, including writes made before a drift.
+    ``written`` is the updated map, including writes made before a drift. ``persist(map)``,
+    if given, is called before each file write so an interrupted run leaves a usable map.
     """
-    runner = _Runner(wf, dispatch, dry_run, log, written or {})
+    runner = _Runner(wf, dispatch, dry_run, log, written or {}, None if dry_run else persist)
     started = time.time()
     report: dict[str, Any] = {"workflow": wf.get("name"), "ok": False, "steps": 0,
                               "llm_calls": 0, "dry_run": dry_run}

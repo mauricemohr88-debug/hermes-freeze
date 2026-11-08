@@ -89,7 +89,8 @@ def run(args, dispatch: Callable[[str, dict], str]) -> int:
     _prepare_tools(wf, attended=_attended(args) and not args.dry_run)
     log = (lambda _m: None) if (args.quiet or args.json) else (lambda m: print(m, flush=True))
     report = replay.run(wf, dispatch, dry_run=args.dry_run, log=log,
-                        written=store.load_written(wf["name"]))
+                        written=store.load_written(wf["name"]),
+                        persist=lambda w: store.save_written(wf["name"], w))
     written = report.pop("written")
     if not args.dry_run:
         store.save_written(wf["name"], written)
