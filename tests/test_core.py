@@ -223,6 +223,80 @@ class SandboxTest(unittest.TestCase):
         self.assertEqual(sandbox.run("def compute(scope):\n    print('hi')\n    return 'ok'", {}), "ok")
 
 
+class SandboxEscapeTest(unittest.TestCase):
+    """Compiled code runs unattended on every replay, so it must stay pure data in, data out."""
+
+    def refused(self, body):
+        code = "def compute(scope):\n" + "".join(f"    {ln}\n" for ln in body.splitlines())
+        with self.assertRaises(sandbox.UnsafeCode, msg=body):
+            sandbox.run(code, {})
+
+    def test_module_attributes_that_reach_the_os_are_refused(self):
+        self.refused("import posixpath\nreturn posixpath.os.system('echo hi')")
+        self.refused("import posixpath\nreturn posixpath.os.environ")
+        self.refused("import io\nreturn io.open('/etc/hosts').read()")
+        self.refused("import io as x\nreturn x.FileIO('/etc/hosts')")
+        self.refused("import posixpath\nreturn posixpath.exists('/etc/hosts')")
+        self.refused("import posixpath\nreturn posixpath.expandvars('$HOME')")
+        self.refused("from posixpath import os\nreturn os")
+        self.refused("from io import open\nreturn open")
+        self.refused("import os.path\nreturn 1")
+        self.refused("import string\nreturn string.Formatter().get_field('0', [1], {})")
+
+    def test_attribute_readers_and_frames_are_refused(self):
+        self.refused("import operator\nreturn operator.attrgetter('x')")
+        self.refused("from functools import update_wrapper\nreturn 1")
+        self.refused("g = (x for x in [1])\nreturn g.gi_frame.f_back")
+        self.refused("try:\n    1/0\nexcept Exception as e:\n    return e.tb_frame")
+        self.refused("return scope.sys")
+
+    def test_runtime_view_blocks_what_the_static_pass_might_miss(self):
+        from unittest import mock
+        attempts = ["import posixpath\n    return posixpath.os.getcwd()",
+                    "import io\n    return io.open('/etc/hosts').read()",
+                    "import operator\n    return operator.attrgetter('real')(1)",
+                    # Submodules a module imported for itself are never handed out.
+                    "import statistics\n    return statistics.random.random()"]
+        for i, body in enumerate(attempts):
+            patched = mock.patch.object(sandbox, "check", lambda code: None) if i < 3 \
+                else mock.patch.object(sandbox, "TIMEOUT_S", sandbox.TIMEOUT_S)
+            with patched, \
+                    self.assertRaises(sandbox.ComputeError, msg=body) as ctx:
+                sandbox.run("def compute(scope):\n    " + body + "\n", {})
+            self.assertIn("is not allowed", str(ctx.exception))
+
+    def test_compiled_code_gets_no_secrets_from_the_environment(self):
+        from unittest import mock
+        seen = {}
+        real_run = sandbox.subprocess.run
+
+        def spy(*args, **kwargs):
+            seen.update(kwargs.get("env") or {"<inherited>": "1"})
+            return real_run(*args, **kwargs)
+
+        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-test-not-real"}), \
+                mock.patch.object(sandbox.subprocess, "run", spy):
+            self.assertEqual(sandbox.run("def compute(scope):\n    return 1\n", {}), 1)
+        self.assertNotIn("OPENROUTER_API_KEY", seen)
+        self.assertNotIn("<inherited>", seen)
+        self.assertTrue(set(seen) <= {"PATH", "SYSTEMROOT"}, seen)
+
+    def test_ordinary_data_code_still_runs(self):
+        code = (
+            "import csv, io, json, re, posixpath\n"
+            "from collections import Counter\n"
+            "from io import StringIO\n"
+            "def compute(scope):\n"
+            "    rows = list(csv.DictReader(io.StringIO(scope['text'])))\n"
+            "    c = Counter(r['status'] for r in rows)\n"
+            "    day = re.search(r'(\\d{4})-(\\d{2})', posixpath.basename(scope['path'])).group(1)\n"
+            "    return json.dumps({'refunded': c['refunded'], 'year': day,\n"
+            "                       'n': len(list(csv.reader(StringIO(scope['text']))))})\n")
+        out = sandbox.run(code, {"text": "id,status\n1,refunded\n2,paid\n",
+                                 "path": "/d/orders_2026-11-08.csv"})
+        self.assertEqual(json.loads(out), {"refunded": 1, "year": "2026", "n": 3})
+
+
 class CompileAndReplayTest(unittest.TestCase):
     def freeze(self, replies):
         draft = analyze.build(TASK, recorded_calls(DATA), None, tempfile.gettempdir())

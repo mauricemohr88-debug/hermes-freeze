@@ -25,8 +25,10 @@ _SYSTEM = (
     "- Define exactly `def compute(scope):` and return the value. Nothing runs at import time.\n"
     "- Derive everything from `scope` so the function stays correct when the data changes. "
     "Never hardcode counts, totals, names or lines that come from tool results.\n"
-    "- Allowed imports: " + ", ".join(sorted(sandbox.ALLOWED_MODULES)) + ". No files, network, "
-    "os, sys, subprocess, eval, exec, open, getattr or dunder attributes.\n"
+    "- Allowed imports: " + ", ".join(sorted(sandbox.ALLOWED_MODULES)) + ". From "
+    + "; ".join(f"{m} only {', '.join(names)}" for m, names in sorted(sandbox.MODULE_ALLOW.items()))
+    + ". No files, network, os, sys, subprocess, eval, exec, open, getattr, "
+    "operator.attrgetter/methodcaller or dunder attributes.\n"
     "- read_file results carry `content` with a `N|` line-number prefix on every line; strip it.\n"
     "- terminal results are dicts with `output` (stdout+stderr text) and `exit_code`.\n"
     "- Read the fields the value depends on directly (`row['amount']`), not with `.get()` "

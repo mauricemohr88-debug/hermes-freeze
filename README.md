@@ -90,13 +90,19 @@ Then, in a chat, let Hermes do a task and type `/freeze <name>`. To try it on sa
   Freeze wrote there, in the recording or the last replay. Freeze reads it through Hermes'
   `read_file` first, so Hermes' stale-write guard sees what it replaces. If you edited the file
   in between, the run stops and leaves it alone.
-- **Compiled code.** A static check runs first. It refuses:
-  - imports outside a small list of data modules;
-  - dunder access;
-  - `open`, `eval`, `exec` and `getattr`.
+- **Compiled code.** It runs on every replay, scheduled ones included, without asking, so it is
+  limited to pure data work. A static check runs first. It refuses:
+  - imports outside a small list of data modules, and in `posixpath`, `io` and `string` every
+    function not on a short list (no `posixpath.exists`, `io.open`, `string.Formatter`);
+  - dunder access, and attribute names that lead to the OS, the interpreter or stack frames
+    (`os`, `sys`, `environ`, `system`, `gi_frame`, `f_globals`, …);
+  - `open`, `eval`, `exec`, `getattr`, `operator.attrgetter` and `methodcaller`.
 
-  The code then runs in a separate `python -I` process with a 10-second timeout and no access
-  to the tools or the plugin. `hermes freeze show <name> --code` shows the code.
+  The code then runs in a separate `python -I` process with an empty environment (no API keys),
+  a 10-second timeout and no access to the tools or the plugin. Modules reach it only through a
+  view that hands out the listed functions and no submodules, so `posixpath.os` fails there too.
+  This is defence in depth, not a hard sandbox. `hermes freeze show <name> --code` shows the
+  code.
 
 ## Disclosure
 

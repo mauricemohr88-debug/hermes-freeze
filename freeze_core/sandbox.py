@@ -1,10 +1,13 @@
 """Run a compiled ``compute(scope)`` function: pure data in, pure data out.
 
-The code was written by a model, so it is checked twice. A static pass refuses imports outside a
-small allowlist, dunder access and the builtins that reach files, the process or the interpreter.
-Then it runs in a separate ``python -I`` process with a timeout and a reduced set of builtins,
-fed the scope as JSON on stdin. It never sees the plugin's memory, the agent or the tool registry.
-This is defence in depth for code the user reviewed at freeze time, not a hard sandbox.
+The code was written by a model and runs on every replay, unattended ones included, so it is
+checked twice. A static pass refuses imports outside a small allowlist, dunder access, attribute
+names that lead to the OS, the interpreter or stack frames, and the builtins that reach files,
+the process or the interpreter. Then it runs in a separate ``python -I`` process with an empty
+environment (no provider keys), a timeout and a reduced set of builtins, fed the scope as JSON on
+stdin. Imported modules are wrapped so only listed functions are reachable: ``posixpath.os`` or
+``io.open`` fail even if the static pass missed them. It never sees the plugin's memory, the agent
+or the tool registry. This is defence in depth, not a hard sandbox.
 
 ``track_reads`` runs the code once more at freeze time and notes which fields of the scope it
 reads (including JSON parsed from a tool's text output), so replays can stop when one of them
@@ -14,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import subprocess
 import sys
 from typing import Any
@@ -27,7 +31,31 @@ _BANNED_NAMES = frozenset({
     "setattr", "delattr", "input", "breakpoint", "exit", "quit", "help", "memoryview",
     "classmethod", "staticmethod", "super", "type", "object",
 })
+# Modules whose public API also reaches files or the OS expose only these names. In the others
+# every public name is reachable except submodules and the names below.
+MODULE_ALLOW = {
+    "posixpath": ["basename", "commonpath", "commonprefix", "dirname", "extsep", "isabs", "join",
+                  "normpath", "sep", "split", "splitdrive", "splitext"],
+    "io": ["BytesIO", "StringIO"],
+    "string": ["Template", "ascii_letters", "ascii_lowercase", "ascii_uppercase", "capwords",
+               "digits", "hexdigits", "octdigits", "printable", "punctuation", "whitespace"],
+}
+# attrgetter/methodcaller read attributes by name and update_wrapper/wraps copy them, which
+# would get around the static check on attribute names.
+MODULE_DENY = {
+    "operator": ["attrgetter", "methodcaller"],
+    "functools": ["update_wrapper", "wraps"],
+}
+# Attribute names that lead out of pure data: the OS, the interpreter, or a stack frame whose
+# globals hold the runner's own unrestricted builtins.
+BANNED_ATTRS = frozenset({
+    "os", "sys", "open", "system", "popen", "environ", "builtins", "modules", "subprocess",
+    "gi_frame", "gi_code", "cr_frame", "cr_code", "ag_frame", "ag_code", "tb_frame", "tb_next",
+    "f_back", "f_globals", "f_locals", "f_builtins", "f_code", "co_code",
+})
 TIMEOUT_S = 10
+# Only what the interpreter needs to start; provider keys and tokens never reach compiled code.
+_CHILD_ENV_KEYS = ("PATH", "SYSTEMROOT")
 # Path markers in recorded reads: any item of a list, JSON parsed from a string, and any value
 # of a dict looked up by a key that comes from the data (a file name, a date) rather than the code.
 LIST, JSON, ANY = 0, 1, 2
@@ -47,16 +75,27 @@ def check(code: str) -> None:
     except SyntaxError as exc:
         raise UnsafeCode(f"syntax error: {exc}") from None
     has_compute = False
+    # Names bound by "import x" / "import x as y", so x.name can be checked per module.
+    modules = {(a.asname or a.name): a.name for n in ast.walk(tree) if isinstance(n, ast.Import)
+               for a in n.names}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name.split(".")[0] not in ALLOWED_MODULES:
+                if alias.name not in ALLOWED_MODULES:
                     raise UnsafeCode(f"import of {alias.name!r} is not allowed")
         elif isinstance(node, ast.ImportFrom):
-            if (node.module or "").split(".")[0] not in ALLOWED_MODULES or node.level:
+            if node.module not in ALLOWED_MODULES or node.level:
                 raise UnsafeCode(f"import from {node.module!r} is not allowed")
-        elif isinstance(node, ast.Attribute) and node.attr.startswith("_"):
+            for alias in node.names:
+                if not _module_name_ok(node.module, alias.name):
+                    raise UnsafeCode(f"{node.module}.{alias.name} is not allowed")
+        elif isinstance(node, ast.Attribute) and (node.attr.startswith("_")
+                                                   or node.attr in BANNED_ATTRS):
             raise UnsafeCode(f"access to {node.attr!r} is not allowed")
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) \
+                and node.value.id in modules and modules[node.value.id] in ALLOWED_MODULES \
+                and not _module_name_ok(modules[node.value.id], node.attr):
+            raise UnsafeCode(f"{modules[node.value.id]}.{node.attr} is not allowed")
         elif isinstance(node, ast.Name) and (node.id in _BANNED_NAMES or node.id.startswith("__")):
             raise UnsafeCode(f"use of {node.id!r} is not allowed")
         elif isinstance(node, (ast.Global, ast.Nonlocal, ast.AsyncFunctionDef, ast.Await)):
@@ -67,19 +106,46 @@ def check(code: str) -> None:
         raise UnsafeCode("code must define compute(scope)")
 
 
+def _module_name_ok(module: str, name: str) -> bool:
+    if name == "*" or name.startswith("_") or name in BANNED_ATTRS:
+        return False
+    if module in MODULE_ALLOW:
+        return name in MODULE_ALLOW[module]
+    return name not in MODULE_DENY.get(module, ())
+
+
 _RUNNER = r"""
-import builtins, io, json, sys
-ALLOWED = set(json.loads(sys.argv[1]))
+import builtins, io, json, sys, types
+POLICY = json.loads(sys.argv[1])
+ALLOWED = set(POLICY["modules"])
+MODULE_ALLOW = {k: set(v) for k, v in POLICY["allow"].items()}
+MODULE_DENY = {k: set(v) for k, v in POLICY["deny"].items()}
+BANNED = set(POLICY["banned"])
 SAFE = ["abs","all","any","bool","chr","dict","divmod","enumerate","filter","float","format",
         "frozenset","hash","int","isinstance","iter","len","list","map","max","min","next","ord",
         "pow","range","repr","reversed","round","set","slice","sorted","str","sum","tuple","zip",
         "Exception","ValueError","KeyError","IndexError","TypeError","ZeroDivisionError",
         "StopIteration","True","False","None","print"]
 real_import = builtins.__import__
+def safe_module(mod):
+    # The compiled code gets this view, never the module: only listed names, no submodules.
+    name = mod.__name__
+    def lookup(attr):
+        if attr.startswith("_") or attr in BANNED or attr in MODULE_DENY.get(name, ()):
+            raise AttributeError("%s.%s is not allowed" % (name, attr))
+        if name in MODULE_ALLOW and attr not in MODULE_ALLOW[name]:
+            raise AttributeError("%s.%s is not allowed" % (name, attr))
+        value = getattr(mod, attr)
+        if isinstance(value, types.ModuleType):
+            raise AttributeError("%s.%s is not allowed" % (name, attr))
+        return value
+    view = type(name, (), {"__slots__": (), "__getattr__": lambda self, attr: lookup(attr),
+                           "__repr__": lambda self: "<module %s>" % name})
+    return view()
 def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
-    if level or name.split(".")[0] not in ALLOWED:
+    if level or name not in ALLOWED:
         raise ImportError("import of %r is not allowed" % name)
-    return real_import(name, globals, locals, fromlist, level)
+    return safe_module(real_import(name, globals, locals, fromlist, level))
 payload = json.loads(sys.stdin.read())
 reads = {}
 absent = set()
@@ -205,6 +271,10 @@ def run_tracked(code: str, scope: dict) -> tuple[Any, dict[str, str]]:
     return out["value"], out.get("misses") or {}
 
 
+_POLICY = json.dumps({"modules": sorted(ALLOWED_MODULES), "allow": MODULE_ALLOW,
+                      "deny": MODULE_DENY, "banned": sorted(BANNED_ATTRS)})
+
+
 def _string_literals(code: str) -> set[str]:
     return {n.value for n in ast.walk(ast.parse(code))
             if isinstance(n, ast.Constant) and isinstance(n.value, str)}
@@ -214,11 +284,12 @@ def _execute(code: str, scope: dict, *, track: bool) -> dict:
     check(code)
     try:
         proc = subprocess.run(
-            [sys.executable, "-I", "-c", _RUNNER, json.dumps(sorted(ALLOWED_MODULES))],
+            [sys.executable, "-I", "-c", _RUNNER, _POLICY],
             input=json.dumps({"code": code, "scope": scope, "track": track,
                               "fields": sorted(_string_literals(code)) if track else []},
                              default=str),
             capture_output=True, text=True, timeout=TIMEOUT_S,
+            env={k: os.environ[k] for k in _CHILD_ENV_KEYS if k in os.environ},
         )
     except subprocess.TimeoutExpired:
         raise ComputeError(f"compute step exceeded {TIMEOUT_S}s") from None

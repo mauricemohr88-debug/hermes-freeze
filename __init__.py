@@ -8,6 +8,7 @@ replays it through Hermes' own tools with zero model calls and stops on drift.
 from __future__ import annotations
 
 import logging
+import os
 import shlex
 import subprocess
 
@@ -26,10 +27,11 @@ _USAGE = (
 
 
 def _cwd() -> str:
+    # The same order Hermes documents: gateway and cron carry terminal.cwd in TERMINAL_CWD,
+    # the CLI runs in its launch folder. Only public, documented sources.
     try:
-        from agent.runtime_cwd import resolve_agent_cwd
-        return str(resolve_agent_cwd())
-    except Exception as exc:  # cwd is metadata; a missing value must not lose the recording
+        return os.environ.get("TERMINAL_CWD") or os.getcwd()
+    except OSError as exc:  # cwd is metadata; a missing value must not lose the recording
         logger.warning("freeze: could not resolve the session folder: %s", exc)
         return ""
 
