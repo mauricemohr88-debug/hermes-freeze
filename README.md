@@ -52,7 +52,7 @@ Then, in a chat, let Hermes do a task and type `/freeze <name>`. To try it on sa
 | `/freeze <name> [--turns N]` | Freeze the last task (or the last N turns) of this chat |
 | `/freeze list` · `show <name>` · `run <name>` · `delete <name>` | The same commands, from a chat |
 | `hermes freeze run <name> [--dry-run] [--fallback agent] [--json] [--quiet]` | Replay |
-| `hermes freeze schedule <name> "0 9 * * *" [--deliver …]` | Create a no-agent cron job for it |
+| `hermes freeze schedule <name> "0 9 * * *" [--fallback agent] [--deliver …]` | Create a no-agent cron job for it |
 | `hermes freeze list` · `show <name> [--code]` · `delete <name>` | Manage workflows |
 
 ## Safety: Freeze does not guess
@@ -76,7 +76,9 @@ Then, in a chat, let Hermes do a task and type `/freeze <name>`. To try it on sa
   - a compiled step that fails;
   - an output file someone edited since Freeze last wrote it.
 
-  `--fallback agent` hands the original task to the agent instead.
+  `--fallback agent` hands the original task to the agent instead. Scheduled jobs only do that
+  when created with `hermes freeze schedule … --fallback agent`; by default they report the
+  drift and stop, so they never make model calls.
 - **Shell commands.** Commands are fixed when you freeze them. Only plain tokens such as paths
   and IDs can vary: no spaces, quotes or shell syntax, and no leading `-`. Write paths taken from
   results must stay inside the workflow's folder.
@@ -109,8 +111,9 @@ Then, in a chat, let Hermes do a task and type `/freeze <name>`. To try it on sa
 - **Recording.** `pre_llm_call`, `post_tool_call`, `post_api_request` and `post_llm_call` hooks
   store every turn's task text, tool arguments, tool results (truncated at 256 KB), final answer
   and token counts. They go in `<HERMES_HOME>/plugin-data/freeze/data.db`. Recordings older than
-  14 days are deleted. Results may contain whatever the tools returned, so treat the folder like
-  your session history.
+  14 days are deleted when the plugin loads and again at most once an hour while turns are
+  recorded, so a gateway that runs for weeks keeps pruning. Results may contain whatever the
+  tools returned, so treat the folder like your session history.
 - **Model calls.** `/freeze` makes model calls through `ctx.llm` (your active model): one per
   compiled step, at most 3 attempts each. It sends the task, the recorded tool results (shortened)
   and the recorded value. Replays make no model calls; `--fallback agent` starts a normal
@@ -121,7 +124,11 @@ Then, in a chat, let Hermes do a task and type `/freeze <name>`. To try it on sa
 - **State.** `<HERMES_HOME>/plugin-data/freeze/written/<name>.json` keeps a SHA-256 hash of each
   file a workflow wrote, for the overwrite check above.
 - **Scheduling.** `hermes freeze schedule` writes `<HERMES_HOME>/scripts/freeze-<name>.sh` and
-  creates a cron job with `hermes cron create --no-agent`.
+  creates a cron job with `hermes cron create --no-agent`. The script runs
+  `hermes freeze run <name> --quiet`: 0 model calls, and drift is reported, not retried. Only a
+  job created with `--fallback agent` starts `hermes chat` on drift, and that run costs model
+  calls. Jobs created with 0.1.4 or earlier still have the fallback; run `schedule` again (and
+  remove the old job) to drop it.
 - **What it does not do.** No network calls of its own, no telemetry, no credentials.
 
 ## Limits

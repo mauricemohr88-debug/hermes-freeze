@@ -18,6 +18,9 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 # but values past the cut cannot be bound, so they end up as compiled steps instead.
 RESULT_CAP = 256_000
 RETENTION_DAYS = 14
+# A gateway can run for weeks, so pruning only at load time would keep old recordings forever.
+# Recording a turn prunes again once this many seconds have passed since the last prune.
+PRUNE_EVERY = 3600
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS calls (
@@ -129,6 +132,22 @@ def prune(now: Optional[float] = None) -> int:
         conn.execute("DELETE FROM turns WHERE COALESCE(ended, started) < ?", (cutoff,))
         conn.commit()
     return n
+
+
+_last_prune = 0.0
+
+
+def maybe_prune(now: Optional[float] = None) -> bool:
+    """Prune unless the last prune in this process was less than PRUNE_EVERY seconds ago."""
+    global _last_prune
+    now = now or time.time()
+    if now - _last_prune < PRUNE_EVERY:
+        return False
+    # Set before pruning: a failing prune is logged by the caller and retried an hour later,
+    # not on every turn.
+    _last_prune = now
+    prune(now)
+    return True
 
 
 def load_turns(session_id: str, last: int = 1) -> list[dict]:

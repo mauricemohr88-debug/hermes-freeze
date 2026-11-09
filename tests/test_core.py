@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from freeze_core import analyze, compiler, freezer, refs, replay, sandbox  # noqa: E402
+from freeze_core import analyze, cli, compiler, freezer, refs, replay, sandbox, store  # noqa: E402
 
 TASK = ("In ./data there are daily order CSV files. Count the rows with status 'refunded' in "
         "every file and write ./refunds.md with one line per file: '<filename>: <count>'.")
@@ -698,6 +698,87 @@ class ExitCodeTest(unittest.TestCase):
         self.assertTrue(any("exited with code 1 in the recording" in n for n in wf["notes"]),
                         wf["notes"])
         self.assertIn("Note: s1 terminal exited with code 1", freezer.summary(wf))
+
+
+class ScheduleTest(unittest.TestCase):
+    """Scheduled runs stay model-free unless the agent fallback is asked for by name."""
+
+    def schedule(self, *flags):
+        import argparse
+        import types
+        from unittest import mock
+        parser = argparse.ArgumentParser()
+        cli.setup(parser)
+        args = parser.parse_args(["schedule", "daily", "0 9 * * *", *flags])
+        home = Path(tempfile.mkdtemp())
+        fake_constants = types.ModuleType("hermes_constants")
+        fake_constants.get_hermes_home = lambda: home
+        ran = []
+        done = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.dict(sys.modules, {"hermes_constants": fake_constants}), \
+                mock.patch.object(cli.store, "load_workflow", return_value={"name": "daily", "steps": []}), \
+                mock.patch.object(cli.freezer, "flagged_steps", return_value=[]), \
+                mock.patch.object(cli, "_hermes_argv", return_value=["hermes"]), \
+                mock.patch.object(cli.subprocess, "run", side_effect=lambda a, **k: ran.append(a) or done), \
+                mock.patch("sys.stdout", new_callable=__import__("io").StringIO) as out:
+            self.assertEqual(cli.schedule(args), 0)
+        script = (home / "scripts" / "freeze-daily.sh").read_text()
+        self.assertIn("--no-agent", ran[0])
+        return script, out.getvalue()
+
+    def test_default_reports_drift_without_the_agent(self):
+        script, out = self.schedule()
+        self.assertNotIn("--fallback", script)
+        self.assertIn("0 model calls per run; on drift the job reports it and stops.", out)
+
+    def test_agent_fallback_is_opt_in_and_says_it_costs_model_calls(self):
+        script, out = self.schedule("--fallback", "agent")
+        self.assertIn("--fallback agent", script)
+        self.assertIn("that run costs model calls", out)
+
+    def test_old_no_fallback_flag_still_works(self):
+        script, _ = self.schedule("--no-fallback")
+        self.assertNotIn("--fallback", script)
+
+
+class PruneTest(unittest.TestCase):
+    """Long-lived processes keep pruning, at most once per PRUNE_EVERY."""
+
+    def test_prunes_again_after_an_hour_not_on_every_turn(self):
+        from unittest import mock
+        with mock.patch.object(store, "_last_prune", 0.0), \
+                mock.patch.object(store, "prune") as prune:
+            t0 = 1_000_000.0
+            self.assertTrue(store.maybe_prune(t0))
+            self.assertFalse(store.maybe_prune(t0 + 60))
+            self.assertFalse(store.maybe_prune(t0 + store.PRUNE_EVERY - 1))
+            self.assertTrue(store.maybe_prune(t0 + store.PRUNE_EVERY))
+            self.assertEqual([c.args for c in prune.call_args_list],
+                             [(t0,), (t0 + store.PRUNE_EVERY,)])
+
+    def test_a_failing_prune_is_not_retried_on_the_next_turn(self):
+        from unittest import mock
+        with mock.patch.object(store, "_last_prune", 0.0), \
+                mock.patch.object(store, "prune", side_effect=OSError("disk")) as prune:
+            with self.assertRaises(OSError):
+                store.maybe_prune(1_000_000.0)
+            self.assertFalse(store.maybe_prune(1_000_010.0))
+            self.assertEqual(prune.call_count, 1)
+
+    def test_prune_drops_only_old_recordings(self):
+        import sqlite3
+        from unittest import mock
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(store._SCHEMA)
+        now = 2_000_000.0
+        old, fresh = now - (store.RETENTION_DAYS + 1) * 86400, now - 3600
+        for ts in (old, fresh):
+            conn.execute("INSERT INTO calls (session_id, tool_name, args, ts) VALUES ('s', 't', '{}', ?)", (ts,))
+            conn.execute("INSERT INTO turns (session_id, turn_id, started) VALUES ('s', ?, ?)", (str(ts), ts))
+        with mock.patch.object(store, "_db", return_value=conn):
+            self.assertEqual(store.prune(now), 1)
+        self.assertEqual(conn.execute("SELECT ts FROM calls").fetchall(), [(fresh,)])
+        self.assertEqual(conn.execute("SELECT started FROM turns").fetchall(), [(fresh,)])
 
 
 class OutputTest(unittest.TestCase):

@@ -57,6 +57,10 @@ def register(ctx) -> None:
                                     else str(user_message or ""))
         except Exception as exc:  # recording must never break the user's turn
             logger.warning("freeze: could not record turn start: %s", exc)
+        try:
+            store.maybe_prune()
+        except Exception as exc:
+            logger.warning("freeze: could not prune old recordings: %s", exc)
         return None
 
     def on_tool(tool_name=None, args=None, result=None, session_id=None, turn_id=None,
@@ -145,6 +149,6 @@ def register(ctx) -> None:
                              cli.make_handler(ctx.dispatch_tool))
 
     try:
-        store.prune()
+        store.maybe_prune()
     except Exception as exc:
         logger.warning("freeze: could not prune old recordings: %s", exc)

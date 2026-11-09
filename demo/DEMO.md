@@ -51,6 +51,7 @@ searches, compiled report code, `write_file` and compiled answer code, each comp
 hermes freeze schedule refunds "0 9 * * *"
 ```
 
-This creates a no-agent cron job: every run is a replay with 0 model calls, and the agent only
-steps in on drift (`--no-fallback` turns that off). `hermes cron list` shows the job, and
+This creates a no-agent cron job: every run is a replay with 0 model calls, and on drift it
+reports the drift and stops. Add `--fallback agent` if the agent should take over the task on
+drift; those runs cost model calls. `hermes cron list` shows the job, and
 `hermes cron remove <job_id>` deletes it.

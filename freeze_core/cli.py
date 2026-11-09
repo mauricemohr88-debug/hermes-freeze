@@ -1,6 +1,7 @@
 """``hermes freeze list|show|run|delete|schedule``."""
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shlex
@@ -37,8 +38,12 @@ def setup(parser) -> None:
     p.add_argument("name")
     p.add_argument("schedule", help="e.g. '0 9 * * *' or 'every 2h'")
     p.add_argument("--deliver", default=None, help="Cron delivery target (default: cron's)")
-    p.add_argument("--no-fallback", action="store_true",
-                   help="On drift, only report it instead of running the agent")
+    # Scheduled runs are sold as model-free, so the agent fallback must be asked for by name.
+    p.add_argument("--fallback", choices=["none", "agent"], default="none",
+                   help="On drift, hand the original task to the agent (costs model calls); "
+                        "default: only report the drift")
+    # Accepted so commands written for 0.1.4 and earlier still work; it is now the default.
+    p.add_argument("--no-fallback", action="store_true", help=argparse.SUPPRESS)
 
 
 def make_handler(dispatch: Callable[[str, dict], str]) -> Callable[[Any], int]:
@@ -233,11 +238,14 @@ def schedule(args) -> int:
     scripts.mkdir(parents=True, exist_ok=True)
     script = scripts / f"freeze-{wf['name']}.sh"
     run_argv = _hermes_argv() + ["freeze", "run", wf["name"], "--quiet"]
-    if not args.no_fallback:
+    fallback = args.fallback == "agent" and not args.no_fallback
+    if fallback:
         run_argv += ["--fallback", "agent"]
+    on_drift = "hands the task to the agent on drift" if fallback else "reports drift and stops"
     script.write_text(
         "#!/usr/bin/env bash\n"
-        f"# Written by the freeze plugin: replays the frozen workflow {wf['name']!r} without the model.\n"
+        f"# Written by the freeze plugin: replays the frozen workflow {wf['name']!r} without the model;\n"
+        f"# {on_drift}.\n"
         f"export HERMES_HOME={shlex.quote(str(home))}\n"
         f"exec {' '.join(shlex.quote(a) for a in run_argv)}\n",
         encoding="utf-8",
@@ -251,6 +259,8 @@ def schedule(args) -> int:
     sys.stdout.write(proc.stdout)
     sys.stderr.write(proc.stderr)
     if proc.returncode == 0:
-        print(f"Scheduled {wf['name']} ({args.schedule}) as a no-agent cron job: "
-              f"0 model calls per run{'' if args.no_fallback else ', the agent only steps in on drift'}.")
+        print(f"Scheduled {wf['name']} ({args.schedule}) as a no-agent cron job. "
+              + ("0 model calls when the replay succeeds; on drift the agent takes over the task "
+                 "and that run costs model calls." if fallback else
+                 "0 model calls per run; on drift the job reports it and stops."))
     return proc.returncode
