@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="340" viewBox="0 0 1280 340" role="img" aria-label="freeze: do it once, freeze it, run it for free">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#04162b"/>
+      <stop offset="0.55" stop-color="#0b3a63"/>
+      <stop offset="1" stop-color="#1a6fa8"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.2" cy="0.5" r="0.45">
+      <stop offset="0" stop-color="#9be2ff" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#9be2ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ice" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#a8e4ff"/>
+    </linearGradient>
+    <!-- userSpaceOnUse: a bounding-box gradient leaves straight vertical lines unpainted -->
+    <linearGradient id="iceStroke" gradientUnits="userSpaceOnUse" x1="0" y1="-80" x2="0" y2="80">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#a8e4ff"/>
+    </linearGradient>
+    <clipPath id="card"><rect width="1280" height="340" rx="24"/></clipPath>
+    <linearGradient id="icicle" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e8f8ff" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#bfe9ff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="soft" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+    <g id="arm">
+      <line x1="0" y1="0" x2="0" y2="-74"/>
+      <line x1="0" y1="-26" x2="-16" y2="-42"/>
+      <line x1="0" y1="-26" x2="16" y2="-42"/>
+      <line x1="0" y1="-48" x2="-12" y2="-60"/>
+      <line x1="0" y1="-48" x2="12" y2="-60"/>
+    </g>
+    <g id="flake">
+      <use href="#arm"/>
+      <use href="#arm" transform="rotate(60)"/>
+      <use href="#arm" transform="rotate(120)"/>
+      <use href="#arm" transform="rotate(180)"/>
+      <use href="#arm" transform="rotate(240)"/>
+      <use href="#arm" transform="rotate(300)"/>
+    </g>
+  </defs>
+
+  <g clip-path="url(#card)">
+  <rect width="1280" height="340" fill="url(#sky)"/>
+  <rect width="1280" height="340" rx="24" fill="url(#glow)"/>
+
+  <!-- frost specks -->
+  <g fill="#d6f3ff">
+    <circle cx="420" cy="62" r="1.6" opacity="0.6"/><circle cx="512" cy="290" r="1.2" opacity="0.5"/>
+    <circle cx="640" cy="40" r="1.4" opacity="0.55"/><circle cx="760" cy="300" r="1.8" opacity="0.4"/>
+    <circle cx="880" cy="70" r="1.2" opacity="0.6"/><circle cx="1010" cy="280" r="1.5" opacity="0.5"/>
+    <circle cx="1120" cy="110" r="1.3" opacity="0.6"/><circle cx="1200" cy="250" r="1.7" opacity="0.45"/>
+    <circle cx="980" cy="160" r="1" opacity="0.5"/><circle cx="1240" cy="60" r="1.2" opacity="0.5"/>
+    <circle cx="330" cy="300" r="1.4" opacity="0.4"/><circle cx="1160" cy="300" r="1" opacity="0.5"/>
+  </g>
+  <g stroke="#d6f3ff" stroke-width="2" stroke-linecap="round" fill="none" opacity="0.18">
+    <use href="#flake" transform="translate(1150 190) scale(0.55)"/>
+    <use href="#flake" transform="translate(1030 70) scale(0.28)"/>
+    <use href="#flake" transform="translate(1235 300) scale(0.22)"/>
+  </g>
+
+  <!-- icicles along the top edge -->
+  <path fill="url(#icicle)" d="M0 0 H1280 V6
+    L1236 6 L1228 34 L1220 6 L1190 6 L1184 22 L1178 6 L1130 6 L1121 46 L1112 6 L1060 6 L1054 20 L1048 6
+    L990 6 L981 38 L972 6 L910 6 L905 18 L900 6 L840 6 L831 50 L822 6 L760 6 L754 24 L748 6
+    L690 6 L682 36 L674 6 L610 6 L605 16 L600 6 L540 6 L531 44 L522 6 L470 6 L464 22 L458 6
+    L400 6 L392 32 L384 6 L330 6 L325 18 L320 6 L270 6 L262 40 L254 6 L200 6 L195 20 L190 6
+    L140 6 L132 30 L124 6 L80 6 L75 16 L70 6 L0 6 Z"/>
+
+  <!-- snowflake mark -->
+  <g transform="translate(200 175)">
+    <circle r="98" fill="#9be2ff" opacity="0.12"/>
+    <g stroke="#9be2ff" stroke-width="10" stroke-linecap="round" fill="none" filter="url(#soft)" opacity="0.7">
+      <use href="#flake"/>
+    </g>
+    <g stroke="url(#iceStroke)" stroke-width="7" stroke-linecap="round" fill="none">
+      <use href="#flake"/>
+    </g>
+    <circle r="9" fill="#ffffff"/>
+  </g>
+
+  <!-- wordmark and taglines -->
+  <text x="350" y="178" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="112" font-weight="800" letter-spacing="2" fill="url(#ice)">freeze</text>
+  <text x="356" y="232" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="34" font-weight="600" fill="#e6f7ff">Do it once. Freeze it. Run it for free.</text>
+  <text x="357" y="276" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="21" fill="#9fd8f5">Hermes Agent plugin · replays agent tasks with 0 model calls</text>
+  </g>
+</svg>

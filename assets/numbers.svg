@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="200" viewBox="0 0 1280 200" role="img" aria-label="Recorded run: 5 model calls, 57,808 tokens, 16.7 seconds. Replay: 0 model calls, 0 tokens, 0.46 seconds.">
+  <!-- Numbers from the demo: the recorded agent run vs. the replay the next morning. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0b3a63"/>
+      <stop offset="1" stop-color="#062441"/>
+    </linearGradient>
+    <linearGradient id="ice" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#a8e4ff"/>
+    </linearGradient>
+    <g id="t">
+      <rect width="400" height="200" rx="20" fill="url(#tile)"/>
+      <rect x="1" y="1" width="398" height="198" rx="19" fill="none" stroke="#9be2ff" stroke-opacity="0.35" stroke-width="2"/>
+      <path d="M24 1 H376 L368 14 L360 1 L300 1 L294 10 L288 1 L200 1 L193 16 L186 1 L110 1 L104 10 L98 1 L24 1 Z" fill="#e8f8ff" fill-opacity="0.5"/>
+    </g>
+  </defs>
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">
+    <g>
+      <use href="#t"/>
+      <text x="200" y="52" font-size="20" font-weight="600" fill="#9fd8f5" letter-spacing="1">MODEL CALLS</text>
+      <text x="200" y="128" font-size="58" font-weight="800" fill="url(#ice)">5 → 0</text>
+      <text x="200" y="170" font-size="18" fill="#cbeeff" opacity="0.8">recorded run → replay</text>
+    </g>
+    <g transform="translate(440 0)">
+      <use href="#t"/>
+      <text x="200" y="52" font-size="20" font-weight="600" fill="#9fd8f5" letter-spacing="1">TOKENS</text>
+      <text x="200" y="128" font-size="58" font-weight="800" fill="url(#ice)">57,808 → 0</text>
+      <text x="200" y="170" font-size="18" fill="#cbeeff" opacity="0.8">nothing to pay per run</text>
+    </g>
+    <g transform="translate(880 0)">
+      <use href="#t"/>
+      <text x="200" y="52" font-size="20" font-weight="600" fill="#9fd8f5" letter-spacing="1">TIME</text>
+      <text x="200" y="128" font-size="50" font-weight="800" fill="url(#ice)">16.7 s → 0.46 s</text>
+      <text x="200" y="170" font-size="18" fill="#cbeeff" opacity="0.8">with a new file to pick up</text>
+    </g>
+  </g>
+</svg>

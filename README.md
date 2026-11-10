@@ -1,6 +1,31 @@
-# freeze
+<p align="center">
+  <img src="assets/banner.svg" alt="freeze: do it once, freeze it, run it for free" width="100%">
+</p>
 
-Let Hermes do a task once, then replay it without the model.
+<p align="center">
+  <a href="https://github.com/mauricemohr88-debug/hermes-freeze/actions/workflows/tests.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/mauricemohr88-debug/hermes-freeze/tests.yml?branch=main&label=tests&style=flat-square"></a>
+  <img alt="version 0.1.5" src="https://img.shields.io/badge/version-0.1.5-9be2ff?style=flat-square">
+  <img alt="Hermes Agent 0.23.0 or later" src="https://img.shields.io/badge/Hermes_Agent-%E2%89%A5_0.23.0-0b3a63?style=flat-square">
+  <img alt="replays make 0 model calls" src="https://img.shields.io/badge/replays-0_model_calls-1a6fa8?style=flat-square">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-062441?style=flat-square"></a>
+</p>
+
+<p align="center"><b>Let Hermes do a task once, then replay it without the model.</b></p>
+
+<p align="center">
+  <img src="assets/numbers.svg" alt="Recorded run: 5 model calls, 57,808 tokens, 16.7 s. Replay: 0 model calls, 0 tokens, 0.46 s." width="100%">
+</p>
+
+<p align="center">
+  <img src="assets/replay.gif" alt="hermes freeze run refunds: a new CSV has arrived, the replay reads 6 files instead of 5 and reports the right answer with 0 model calls in 0.46 s" width="100%">
+  <br>
+  <sub>Next morning a new CSV has arrived: the replay picks it up and gets the right answer with 0 model calls.
+  <a href="https://github.com/mauricemohr88-debug/hermes-freeze/releases/download/v0.1.0/freeze-demo.mp4">Full demo video (84 s)</a></sub>
+</p>
+
+Recurring agent tasks pay for the same reasoning every time. Freeze keeps the parts that need
+reasoning out of the loop: the model works the task out once, and every later run is the same
+tool calls on fresh data.
 
 ```
 you:     Read each CSV in ./data, count the refunded rows, write refunds.md, tell me the worst day.
@@ -14,11 +39,7 @@ November 7, 2026 had the most refunds: 7.
 ✓ Replayed 7 steps, 11 tool calls, 0 model calls, 0.46 s
 ```
 
-Recurring agent tasks pay for the same reasoning every time. Freeze keeps the parts that need
-reasoning out of the loop: the model works the task out once, and every later run is the same
-tool calls on fresh data.
-
-## Install
+## 🧊 Install
 
 ```bash
 hermes plugins install https://github.com/mauricemohr88-debug/hermes-freeze
@@ -28,7 +49,19 @@ hermes plugins enable freeze
 Then, in a chat, let Hermes do a task and type `/freeze <name>`. To try it on sample data, see
 [demo/DEMO.md](demo/DEMO.md).
 
-## How it works
+## ❄️ How it works
+
+```mermaid
+flowchart LR
+    A["🗣️ Record<br/>hooks log each turn"] --> B["🔎 Analyse<br/>constants, bindings, loops"]
+    B --> C["🧊 Compile and check<br/>code must reproduce the recording"]
+    C --> D["⚡ Replay<br/>Hermes tools, 0 model calls"]
+    D -- "drift" --> E["✋ Stop<br/>nothing wrong gets written"]
+    classDef ice fill:#e3f6ff,stroke:#1a6fa8,stroke-width:2px,color:#062441
+    classDef stop fill:#fff4e5,stroke:#c77700,stroke-width:2px,color:#4a2c00
+    class A,B,C,D ice
+    class E stop
+```
 
 1. **Record.** Hooks write each turn's tool calls, results, the task and the final answer to a
    local database.
@@ -45,7 +78,7 @@ Then, in a chat, let Hermes do a task and type `/freeze <name>`. To try it on sa
 4. **Replay.** `hermes freeze run <name>` calls Hermes' own tools through `ctx.dispatch_tool`,
    runs the compiled steps in a separate restricted Python process and makes no model calls.
 
-## Commands
+## ⌨️ Commands
 
 | | |
 |---|---|
@@ -55,7 +88,7 @@ Then, in a chat, let Hermes do a task and type `/freeze <name>`. To try it on sa
 | `hermes freeze schedule <name> "0 9 * * *" [--fallback agent] [--deliver …]` | Create a no-agent cron job for it |
 | `hermes freeze list` · `show <name> [--code]` · `delete <name>` | Manage workflows |
 
-## Safety: Freeze does not guess
+## 🛡️ Safety: Freeze does not guess
 
 - **Missing data.** If the agent's output depends on data its tool calls never returned, `/freeze`
   refuses and names the missing items. In testing, `gpt-4.1` once counted 3 of 5 files, made up
@@ -100,13 +133,13 @@ Then, in a chat, let Hermes do a task and type `/freeze <name>`. To try it on sa
     (`os`, `sys`, `environ`, `system`, `gi_frame`, `f_globals`, …);
   - `open`, `eval`, `exec`, `getattr`, `operator.attrgetter` and `methodcaller`.
 
-  The code then runs in a separate `python -I` process with an empty environment (no API keys),
+  The code then runs in a separate `python -I` process whose environment holds only `PATH` (no API keys),
   a 10-second timeout and no access to the tools or the plugin. Modules reach it only through a
   view that hands out the listed functions and no submodules, so `posixpath.os` fails there too.
   This is defence in depth, not a hard sandbox. `hermes freeze show <name> --code` shows the
   code.
 
-## Disclosure
+## 🔍 Disclosure
 
 - **Recording.** `pre_llm_call`, `post_tool_call`, `post_api_request` and `post_llm_call` hooks
   store every turn's task text, tool arguments, tool results (truncated at 256 KB), final answer
@@ -131,7 +164,7 @@ Then, in a chat, let Hermes do a task and type `/freeze <name>`. To try it on sa
   remove the old job) to drop it.
 - **What it does not do.** No network calls of its own, no telemetry, no credentials.
 
-## Limits
+## 🚧 Limits
 
 - Freeze catches structural drift, not every change in meaning. A field that keeps its name but
   changes what it means goes unnoticed, for example an amount that switches from cents to dollars.
@@ -150,14 +183,14 @@ Then, in a chat, let Hermes do a task and type `/freeze <name>`. To try it on sa
   `hermes freeze …` (and with it `/freeze run` and scheduling) is unavailable there. Use the
   default, `plugins.isolation: in_process`.
 
-## Development
+## 🛠️ Development
 
 ```bash
-python3 -m unittest discover -s tests      # 31 tests, no Hermes needed
+python3 -m unittest discover -s tests      # 62 tests, no Hermes needed
 hermes plugins doctor . --ci
 hermes plugins validate .
 ```
 
-## License
+## 📄 License
 
 MIT
